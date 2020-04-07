@@ -1,0 +1,138 @@
+
+# コマンドラインからではなく、マネージメントコンソールからデプロイするとパラメータを入力できます
+# 前提:
+# VPC, EC2, Subnet, SecurityGroup, ACMがデプロイが必要
+# 動作:
+# プロトコル HTTPSかつ アクセス先がweb.host.domain の場合 web instance, apの場合はap instanceに接続する
+# 上記以外は403エラー。これはホストベースルーティング(他にもパスベースルーティングとか色々ある)
+# https://docs.aws.amazon.com/ja_jp/AWSCloudFormation/latest/UserGuide/AWS_ElasticLoadBalancingV2.html
+
+AWSTemplateFormatVersion: "2010-09-09"
+Parameters:
+  LoadBalancerName:
+    Description: "A name for the load balancer."
+    Type: String
+    Default: "DefaultALBName"
+  VPCId:
+    Description: "The physical ID of the VPC."
+    Type: AWS::EC2::VPC::Id
+  ALBSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: "at least 2 subnets"
+  SecurityGroupId:
+    Type: AWS::EC2::SecurityGroup::Id
+    Description: "Security Group Id"
+  WebInstance:
+    Type: AWS::EC2::Instance::Id
+    Description: ""
+  ApInstance:
+    Type: AWS::EC2::Instance::Id
+  CertificateArn:
+    Type: String
+  
+  # ログを取得したい場合、S3Bucketを先にデプロイする必要があります
+  # S3LogBucket:
+  #   Type: String
+Resources:
+  ALB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Type: application 
+      Name: !Ref LoadBalancerName
+      Scheme: internet-facing
+      LoadBalancerAttributes:
+        - Key: idle_timeout.timeout_seconds
+          Value: 60
+        # - Key: routing.http2.enabled
+        #   Value: true
+        - Key: deletion_protection.enabled
+          Value: false
+        # - Key: access_logs.s3.bucket
+        #   Value: !Ref S3LogBucket
+      Subnets:
+        Ref: ALBSubnetIds
+      SecurityGroups: 
+        - !Ref SecurityGroupId
+      Tags:
+        - Key: "Name"
+          Value: "alb" 
+
+  ListenerHttps:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties: 
+      Certificates: 
+        - CertificateArn: !Ref CertificateArn
+      DefaultActions:
+        - Type: fixed-response
+          FixedResponseConfig:
+            StatusCode: 403
+            MessageBody: Not authorized Access.
+            ContentType: text/plain
+      LoadBalancerArn: !Ref ALB
+      Port: 443
+      Protocol: HTTPS
+      SslPolicy: "ELBSecurityPolicy-2016-08"
+
+  ListenerRuleHttpWeb:
+    Type: 'AWS::ElasticLoadBalancingV2::ListenerRule'
+    Properties:
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroupWeb
+      Conditions:
+        - Field: host-header
+          HostHeaderConfig:
+            Values:
+              - 'web.host.domain'
+      ListenerArn: !Ref ListenerHttps
+      Priority: 1
+  ListenerRuleHttpAp:
+    Type: 'AWS::ElasticLoadBalancingV2::ListenerRule'
+    Properties:
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroupAp
+      Conditions:
+        - Field: host-header
+          HostHeaderConfig:
+            Values:
+              - 'ap.host.domain'
+      ListenerArn: !Ref ListenerHttps
+      Priority: 2
+  
+  TargetGroupWeb: #success code 未設定
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties: 
+      Name: 'Webtarget'
+      HealthCheckEnabled: true
+      HealthCheckIntervalSeconds: 30
+      HealthCheckPath: /healthcheck.html
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 5
+      UnhealthyThresholdCount: 2
+      VpcId: !Ref VPCId
+      TargetType: instance
+      Protocol: HTTP
+      Port: 80 
+      Targets: 
+        - Id: !Ref WebInstance 
+          Port: 80 
+  TargetGroupAp: 
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties: 
+      Name: 'APtarget'
+      HealthCheckEnabled: true
+      HealthCheckIntervalSeconds: 30
+      HealthCheckPath: /getHealthCheck
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 5
+      UnhealthyThresholdCount: 2
+      VpcId: !Ref VPCId
+      TargetType: instance
+      Protocol: HTTP
+      Port: 80
+      Targets: 
+        - Id: !Ref ApInstance
+          Port: 8080
